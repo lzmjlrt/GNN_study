@@ -81,9 +81,7 @@ class MyGraphSage(torch.nn.Module):
         self.lin_l = Linear(in_channels, out_channels)
         self.lin_r = Linear(in_channels, out_channels)
     def forward(self, x, edge_index):
-        #先进行聚合操作
         out = self.aggregate(x, edge_index)
-        #再进行线性变换
         #out = F.relu(self.lin_l(torch.cat([x, out], dim=1)))
         out = F.relu(self.lin_l(x)+self.lin_r(out))
         norm = out.norm(p=2, dim=1, keepdim=True) + 1e-6  # 计算L2范数并避免除以0

@@ -48,7 +48,7 @@ for i in range(250):
         break
     else:
         rank = r_1
-# # 计算特征值和特征向量
+
 # eigenvalues, eigenvectors = torch.linalg.eig(M)
 
 # # 将特征值从复数转换为实数部分
