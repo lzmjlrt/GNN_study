@@ -14,15 +14,35 @@ from torch_sparse import SparseTensor, spmm
 from torch.nn import Parameter, Linear
 from torch_sparse import SparseTensor, set_diag
 from torch_geometric.nn.conv import MessagePassing
-from torch_geometric.utils import remove_self_loops, add_self_loops, softmax
+from torch_geometric.utils import remove_self_loops, add_self_loops, softmax,to_dense_adj
 #引入karate数据集以及cora
+from matplotlib import pyplot as plt
+import networkx as nx
 from torch_geometric.datasets import KarateClub, Planetoid
+from sklearn.manifold import TSNE
 
 test_tensor = torch.tensor([[1., 2., 3.], 
                             [3., 2., 1.],
                             [1., 1., 1.]])
 print(torch_scatter.scatter(test_tensor, index=torch.tensor([0, 0,1]), dim=1,dim_size=3, reduce='sum'))
 
+def visualize(h, color, epoch=None, loss=None):
+    plt.figure(figsize=(7,7))
+    plt.xticks([])
+    plt.yticks([])
+
+    if torch.is_tensor(h):
+        h = h.detach().cpu().numpy()
+        tsne = TSNE(n_components=2)
+        h_2d = tsne.fit_transform(h)
+        plt.scatter(h_2d[:, 0], h_2d[:, 1], s=140, c=color, cmap="Set2")
+        if epoch is not None and loss is not None:
+            plt.xlabel(f'Epoch: {epoch}, Loss: {loss.item():.4f}', fontsize=16)
+    else:
+        nx.draw_networkx(G, pos=nx.spring_layout(G, seed=42), with_labels=False,
+                         node_color=color, cmap="Set2")
+    plt.show()
+    
 def aggregate(inputs, index, dim_size = None):
 
         out = None
@@ -102,8 +122,8 @@ class MyGraphSage(torch.nn.Module):
 class MyNet(torch.nn.Module):
     def __init__(self):
         super(MyNet, self).__init__()
-        self.conv1 = BuildGcn(cora_dataset.num_features,32)
-        self.conv2 = MyGraphSage(32, 16)
+        self.conv1 = SGC(cora_dataset.num_features,32)
+        self.conv2 = SGC(32, 16)
         self.lin = Linear(16, 7)
         
     def forward(self, x, edge_index):
@@ -139,7 +159,41 @@ class SGC(torch.nn.Module):#复现Simple Graph Convolution
         x = norm_adj_matrix @ x
         return F.softmax(self.lin(x),dim=1)
     
-
+class GAT(torch.nn.Module):#复现GAT,不考虑多头注意力机制
+    def __init__(self,in_channels,out_channels):
+        super(GAT,self).__init__()
+        self.lin = Linear(in_channels, out_channels)
+        self.attention = Linear(2*out_channels,1)
+    def forward(self,x,edge_index):
+        #加上self-loop
+        edge_index_with_self_loops, _ = pyg_utils.add_self_loops(edge_index, num_nodes=x.size(0))
+        #获得加上self-loop的邻接矩阵
+        adj_matrix = to_dense_adj(edge_index_with_self_loops,max_num_nodes=x.size(0))[0]
+        #构造一个和邻接矩阵一样大小的全0矩阵
+        attention_matrix = torch.zeros_like(adj_matrix)
+        for i in range(x.size(0)):
+            #获取他所有邻居节点的特征向量
+            neighbors = adj_matrix[i].nonzero(as_tuple=False).squeeze()#neighbors是一个维度为n*1的tensor
+            if len(neighbors)>0:
+                denominator=0
+                #使用for循环来迭代，不要用广播
+                for j in neighbors:
+                    neighbors_feature=x[j]
+                    #whi_whk=torch.cat(self.lin(x[i].unsqueeze(0)),self.lin(neighbors_feature.unsqueeze(0)),dim=1)
+                    whi_whk=torch.cat((self.lin(x[i].unsqueeze(0)), self.lin(neighbors_feature.unsqueeze(0))), dim=1)
+                    denominator += torch.exp(F.leaky_relu(self.attention(whi_whk)))
+                #下面就是处理分子部分，就是每个邻居节点的aj
+                for j in neighbors:
+                    neighbors_feature=x[j]
+                    #whi_whj=torch.cat(self.lin(x[i].unsqueeze(0)),self.lin(neighbors_feature.unsqueeze(0)),dim=1)
+                    whi_whj=torch.cat((self.lin(x[i].unsqueeze(0)), self.lin(neighbors_feature.unsqueeze(0))), dim=1)
+                    ai_j=torch.exp(F.leaky_relu(self.attention(whi_whj)))/denominator
+                    #print(ai_j)
+                    #print(ai_j.shape)
+                    attention_matrix[i,j]=ai_j
+        out = F.elu(attention_matrix@self.lin(x))
+        return out
+            
 
 
 
@@ -147,7 +201,7 @@ cora_dataset = Planetoid(root='cora', name='Cora')
 
 train_loader = DataLoader(cora_dataset, batch_size=32, shuffle=True)
 test_loader = DataLoader(cora_dataset, batch_size=32, shuffle=False)
-model=SGC(cora_dataset.num_features,cora_dataset.num_classes,3)
+model=GAT(cora_dataset.num_features,7)
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 criterion = torch.nn.CrossEntropyLoss()
 def train():
@@ -182,18 +236,20 @@ for epoch in range(100):
     loss = train()
     print('Epoch: {}, Loss: {:.4f}'.format(epoch, loss))
     # 早停逻辑
-    if loss < best_loss:
-        best_loss = loss
-        patience_counter = 0  # 重置耐心计数器
-    else:
-        patience_counter += 1  # 增加耐心计数器
+    # if loss < best_loss:
+    #     best_loss = loss
+    #     patience_counter = 0  # 重置耐心计数器
+    # else:
+    #     patience_counter += 1  # 增加耐心计数器
     
-    if patience_counter >= patience:
-        print("Early stopping triggered. Stopping training.")
-        break  # 达到耐心阈值，停止训练
+    # if patience_counter >= patience:
+    #     print("Early stopping triggered. Stopping training.")
+    #     break  # 达到耐心阈值，停止训练
     
 model.eval()
 test_acc = test(test_loader)
+h = model(cora_dataset[0].x, cora_dataset[0].edge_index)
+visualize(h, color=cora_dataset[0].y)
 print('Test Accuracy: {:.4f}'.format(test_acc))#第一次我自己改的aggressgate是0.7670，第二次leakyrelu直接0.7410，
 
 #为何我自己写的矩阵乘法版本的gcn在cora数据集上Test Accuracy: 0.7140，论文里是0.81
